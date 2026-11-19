@@ -13,6 +13,7 @@ import (
 	"github.com/egoist/mygo/ui"
 
 	"pausepoint/internal/breaks"
+	"pausepoint/internal/i18n"
 	"pausepoint/internal/prefs"
 )
 
@@ -33,11 +34,12 @@ const (
 // All desktop state is owned by the MyGo main thread.
 type desktop struct {
 	scheduler    *breaks.Scheduler
-	prefs        breaks.Settings
+	prefs        prefs.Settings
+	language     i18n.Language
 	path         string
 	draft        settingsDraft
-	settingsInfo string
-	notifyInfo   string
+	settingsInfo formMessage
+	notifyFailed bool
 	lastTick     time.Time
 	state        breaks.State
 	quitting     bool
@@ -49,6 +51,8 @@ type desktop struct {
 	trayStatus     *mygo.MenuItem
 	trayPause      *mygo.MenuItem
 	trayStart      *mygo.MenuItem
+	traySettings   *mygo.MenuItem
+	trayQuit       *mygo.MenuItem
 	trayText       string
 
 	notification    *mygo.Notification
@@ -62,7 +66,7 @@ func main() {
 		return
 	}
 
-	settings := breaks.Defaults()
+	settings := prefs.Defaults()
 	var confirmed bool
 	path, err := prefs.Path()
 	if err == nil {
@@ -74,7 +78,7 @@ func main() {
 	}
 	if err != nil {
 		log.Print("load settings: ", err)
-		a.settingsInfo = "Could not load your settings. Defaults are in use."
+		a.settingsInfo = formMessage{key: i18n.LoadFailed}
 	}
 	mygo.App.WhenReady(a.ready)
 	mygo.App.OnActivate(func(visible bool) {
@@ -96,6 +100,7 @@ func main() {
 }
 
 func (a *desktop) ready() {
+	a.language = resolveLanguage(a.prefs.Language, mygo.App.PreferredLanguages())
 	sound, err := audio.DecodeSound(completionWAV)
 	if err != nil {
 		log.Print("decode break completion sound: ", err)
@@ -103,7 +108,7 @@ func (a *desktop) ready() {
 		a.completionSound = sound
 	}
 	a.lastTick = time.Now()
-	a.scheduler = breaks.New(a.prefs, a.lastTick)
+	a.scheduler = breaks.New(a.prefs.Settings, a.lastTick)
 	a.state = a.scheduler.State(a.lastTick)
 	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { a.quitting = true })
 	mygo.App.OnQuitCanceled(func() { a.quitting = false })
@@ -112,7 +117,7 @@ func (a *desktop) ready() {
 		a.refresh(time.Now())
 	})
 	mygo.Power.OnResume(func() { a.wake(time.Now()) })
-	release := mygo.Power.KeepRunning("Schedule break reminders")
+	release := mygo.Power.KeepRunning(a.language.Text(i18n.KeepRunningReason))
 
 	a.settings = mygo.NewWindow(mygo.WindowOptions{
 		Title: "Pausepoint", Width: 610, Height: 590, MinWidth: 540, MinHeight: 440,
@@ -126,7 +131,7 @@ func (a *desktop) ready() {
 		a.settings.Hide()
 	})
 	a.rest = mygo.NewWindow(mygo.WindowOptions{
-		Title: "Pausepoint Break", Width: 460, Height: 330, Hidden: true,
+		Title: a.language.Text(i18n.BreakWindowTitle), Width: 460, Height: 330, Hidden: true,
 		AlwaysOnTop: true, SkipTaskbar: true, DisableMinimize: true, DisableMaximize: true,
 		Content: ui.View(a.breakView),
 	})
@@ -172,15 +177,15 @@ func (a *desktop) ready() {
 }
 
 func (a *desktop) installTray() {
-	a.trayStatus = &mygo.MenuItem{Label: statusText(a.state), Disabled: true}
-	a.trayPause = &mygo.MenuItem{Label: "Pause reminders", Click: menuAction(a.togglePause)}
-	a.trayStart = &mygo.MenuItem{Label: "Start next break now", Click: menuAction(a.startBreak)}
+	a.trayStatus = &mygo.MenuItem{Label: statusText(a.language, a.state), Disabled: true}
+	a.trayPause = &mygo.MenuItem{Label: pauseLabel(a.language, a.state), Click: menuAction(a.togglePause)}
+	a.trayStart = &mygo.MenuItem{Label: a.language.Text(i18n.StartBreakNow), Click: menuAction(a.startBreak)}
+	a.traySettings = &mygo.MenuItem{Label: a.language.Text(i18n.TraySettings), Click: menuAction(a.showSettings)}
+	a.trayQuit = &mygo.MenuItem{Label: a.language.Text(i18n.Quit), Role: mygo.RoleQuit}
 	tray, err := mygo.NewTray(mygo.TrayOptions{
 		ID: "pausepoint", Icon: trayIcon, ToolTip: "Pausepoint",
 		Menu: mygo.NewMenu([]*mygo.MenuItem{
-			a.trayStatus, a.trayPause, a.trayStart, mygo.Separator(),
-			{Label: "Settings…", Click: menuAction(a.showSettings)},
-			{Role: mygo.RoleQuit},
+			a.trayStatus, a.trayPause, a.trayStart, mygo.Separator(), a.traySettings, a.trayQuit,
 		}),
 	})
 	if err != nil {
@@ -189,6 +194,22 @@ func (a *desktop) installTray() {
 	}
 	a.tray = tray
 	mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory) // macOS uses the menu bar item as the main entry point.
+}
+
+func (a *desktop) updateLanguage() {
+	language := resolveLanguage(a.prefs.Language, mygo.App.PreferredLanguages())
+	if language == a.language {
+		return
+	}
+	a.language = language
+	a.rest.SetTitle(language.Text(i18n.BreakWindowTitle))
+	if a.tray != nil {
+		a.trayPause.SetLabel(pauseLabel(language, a.state))
+		a.trayStart.SetLabel(language.Text(i18n.StartBreakNow))
+		a.traySettings.SetLabel(language.Text(i18n.TraySettings))
+		a.trayQuit.SetLabel(language.Text(i18n.Quit))
+	}
+	a.settings.Invalidate()
 }
 
 func menuAction(fn func()) func(*mygo.MenuItem, *mygo.Window) {
@@ -246,7 +267,7 @@ func (a *desktop) refresh(now time.Time) {
 	if a.state.Phase == breaks.Active {
 		a.rest.Invalidate()
 	}
-	text := statusText(a.state)
+	text := statusText(a.language, a.state)
 	if a.tray != nil {
 		if text != a.trayText {
 			a.trayText = text
@@ -254,12 +275,12 @@ func (a *desktop) refresh(now time.Time) {
 			a.tray.SetToolTip("Pausepoint · " + text)
 		}
 		if previous.Phase != a.state.Phase || previous.CanSkip != a.state.CanSkip {
-			a.trayPause.SetLabel(pauseLabel(a.state))
+			a.trayPause.SetLabel(pauseLabel(a.language, a.state))
 			a.trayPause.SetEnabled(canTogglePause(a.state))
 			a.trayStart.SetEnabled(a.state.Phase == breaks.Waiting)
 		}
 	}
-	if a.settings.IsVisible() && (text != statusText(previous) || previous.CanSkip != a.state.CanSkip) {
+	if a.settings.IsVisible() && (text != statusText(a.language, previous) || previous.CanSkip != a.state.CanSkip) {
 		a.settings.Invalidate()
 	}
 }
@@ -298,7 +319,7 @@ func (a *desktop) postpone() {
 func (a *desktop) showNotice() {
 	a.clearNotice()
 	note := mygo.NewNotification(mygo.NotificationOptions{
-		Title: "Pausepoint", Body: statusText(a.state),
+		Title: "Pausepoint", Body: statusText(a.language, a.state),
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), a.state.Remaining)
 	a.notification, a.cancelNotice = note, cancel
@@ -308,7 +329,7 @@ func (a *desktop) showNotice() {
 			log.Print("advance notice: ", err)
 			mygo.RunOnMain(func() {
 				if a.notification == note && !a.quitting {
-					a.notifyInfo = "Desktop notifications are unavailable. Break windows will still open."
+					a.notifyFailed = true
 					a.settings.Invalidate()
 				}
 			})

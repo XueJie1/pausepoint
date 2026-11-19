@@ -10,14 +10,33 @@ import (
 	"time"
 
 	"pausepoint/internal/breaks"
+	"pausepoint/internal/i18n"
 )
+
+// Settings holds the schedule and desktop preferences.
+type Settings struct {
+	breaks.Settings
+	Language i18n.Language
+}
+
+func Defaults() Settings {
+	return Settings{Settings: breaks.Defaults()}
+}
+
+func (s Settings) Validate() error {
+	if !s.Language.Valid() {
+		return fmt.Errorf("unsupported language %q", s.Language)
+	}
+	return s.Settings.Validate()
+}
 
 // Store whole seconds as int32 so even invalid inputs convert without overflowing time.Duration.
 type fileSettings struct {
-	Interval       int32    `json:"interval"`
-	Short          fileRule `json:"short"`
-	Long           fileRule `json:"long"`
-	SetupConfirmed bool     `json:"setupConfirmed"`
+	Interval       int32         `json:"interval"`
+	Short          fileRule      `json:"short"`
+	Long           fileRule      `json:"long"`
+	SetupConfirmed bool          `json:"setupConfirmed"`
+	Language       i18n.Language `json:"language,omitempty"`
 }
 
 type fileRule struct {
@@ -27,7 +46,7 @@ type fileRule struct {
 	Strict   bool  `json:"strict"`
 }
 
-func encode(s breaks.Settings) fileSettings {
+func encode(s Settings) fileSettings {
 	rule := func(r breaks.Rule) fileRule {
 		return fileRule{int32(r.Duration / time.Second), int32(r.Notice / time.Second), int32(r.Postpone / time.Second), r.Strict}
 	}
@@ -36,10 +55,11 @@ func encode(s breaks.Settings) fileSettings {
 		Short:          rule(s.Short),
 		Long:           rule(s.Long),
 		SetupConfirmed: true,
+		Language:       s.Language,
 	}
 }
 
-func (f fileSettings) decode() breaks.Settings {
+func (f fileSettings) decode() Settings {
 	rule := func(r fileRule) breaks.Rule {
 		return breaks.Rule{
 			Duration: time.Duration(r.Duration) * time.Second,
@@ -48,7 +68,10 @@ func (f fileSettings) decode() breaks.Settings {
 			Strict:   r.Strict,
 		}
 	}
-	return breaks.Settings{Interval: time.Duration(f.Interval) * time.Second, Short: rule(f.Short), Long: rule(f.Long)}
+	return Settings{
+		Settings: breaks.Settings{Interval: time.Duration(f.Interval) * time.Second, Short: rule(f.Short), Long: rule(f.Long)},
+		Language: f.Language,
+	}
 }
 
 func Path() (string, error) {
@@ -62,8 +85,8 @@ func Path() (string, error) {
 // Load returns the settings and whether setup has been confirmed. A valid
 // legacy file also counts as confirmed because it was created by an explicit save.
 // A missing or invalid file returns unconfirmed defaults and is left untouched.
-func Load(path string) (breaks.Settings, bool, error) {
-	defaults := breaks.Defaults()
+func Load(path string) (Settings, bool, error) {
+	defaults := Defaults()
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return defaults, false, nil
@@ -86,7 +109,7 @@ func Load(path string) (breaks.Settings, bool, error) {
 }
 
 // Save validates and writes settings, recording that setup has been confirmed.
-func Save(path string, settings breaks.Settings) error {
+func Save(path string, settings Settings) error {
 	if err := settings.Validate(); err != nil {
 		return err
 	}

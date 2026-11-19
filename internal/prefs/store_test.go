@@ -7,12 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"pausepoint/internal/breaks"
+	"pausepoint/internal/i18n"
 )
 
 func TestLoadDefaultsAndPartialSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	want := breaks.Defaults()
+	want := Defaults()
 	if got, confirmed, err := Load(path); err != nil || got != want || confirmed {
 		t.Fatalf("missing file: got %+v, confirmed %t, %v", got, confirmed, err)
 	}
@@ -32,18 +32,18 @@ func TestLoadUnconfirmedSettings(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"setupConfirmed":false}`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if got, confirmed, err := Load(path); err != nil || got != breaks.Defaults() || confirmed {
+	if got, confirmed, err := Load(path); err != nil || got != Defaults() || confirmed {
 		t.Fatalf("unconfirmed settings: got %+v, confirmed %t, %v", got, confirmed, err)
 	}
 }
 
 func TestLoadInvalidSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	for _, data := range []string{`{`, `null`, `{"interval":0}`, `{"short":{"notice":600}}`, `{"long":{"duration":1.5}}`, `{"interval":9223372036854775807}`, `{"setupConfirmed":"true"}`} {
+	for _, data := range []string{`{`, `null`, `{"interval":0}`, `{"short":{"notice":600}}`, `{"long":{"duration":1.5}}`, `{"interval":9223372036854775807}`, `{"setupConfirmed":"true"}`, `{"language":"unsupported"}`, `{"language":1}`} {
 		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if got, confirmed, err := Load(path); err == nil || got != breaks.Defaults() || confirmed {
+		if got, confirmed, err := Load(path); err == nil || got != Defaults() || confirmed {
 			t.Fatalf("loading %s: got %+v, confirmed %t, %v", data, got, confirmed, err)
 		}
 		if got, err := os.ReadFile(path); err != nil || string(got) != data {
@@ -55,12 +55,12 @@ func TestLoadInvalidSettings(t *testing.T) {
 func TestSaveReplacesOnlyWithValidSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "pausepoint", "settings.json")
 	for _, interval := range []time.Duration{10 * time.Minute, 9 * time.Minute} {
-		want := breaks.Defaults()
+		want := Defaults()
 		want.Interval, want.Long.Strict, want.Short.Postpone = interval, true, 0
 		if err := Save(path, want); err != nil {
 			t.Fatal(err)
 		}
-		if err := Save(path, breaks.Settings{}); err == nil {
+		if err := Save(path, Settings{}); err == nil {
 			t.Fatal("saved invalid settings")
 		}
 		if got, confirmed, err := Load(path); err != nil || got != want || !confirmed {
@@ -73,6 +73,25 @@ func TestSaveReplacesOnlyWithValidSettings(t *testing.T) {
 		var saved fileSettings
 		if err := json.Unmarshal(data, &saved); err != nil || !saved.SetupConfirmed {
 			t.Fatalf("saved confirmation: got %t, %v", saved.SetupConfirmed, err)
+		}
+	}
+}
+
+func TestSaveLanguagePreference(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	want := Defaults()
+	for _, language := range []i18n.Language{"ar", "zh", "en", "fr", "ru", "es", ""} {
+		want.Language = language
+		if err := Save(path, want); err != nil {
+			t.Fatal(err)
+		}
+		invalid := want
+		invalid.Language = "unsupported"
+		if err := Save(path, invalid); err == nil {
+			t.Fatal("saved unsupported language")
+		}
+		if got, confirmed, err := Load(path); err != nil || got != want || !confirmed {
+			t.Fatalf("language %q: got %+v, confirmed %t, %v", language, got, confirmed, err)
 		}
 	}
 }

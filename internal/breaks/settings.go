@@ -36,20 +36,53 @@ func (s Settings) Rule(kind Kind) Rule {
 	return s.Short
 }
 
+type Field uint8
+
+const (
+	Interval Field = iota
+	ShortDuration
+	ShortNotice
+	ShortPostpone
+	LongDuration
+	LongNotice
+	LongPostpone
+)
+
+// ValidationError identifies the invalid field without requiring callers to parse an English error.
+type ValidationError struct{ Field Field }
+
+func (e ValidationError) Error() string {
+	labels := [...]string{"work interval", "short break duration", "short break notice", "short break postponement", "long break duration", "long break notice", "long break postponement"}
+	label := labels[e.Field]
+	switch e.Field {
+	case ShortNotice, LongNotice:
+		return label + " must be less than the work interval"
+	case ShortPostpone, LongPostpone:
+		return fmt.Sprintf("%s must be 0–86400 whole seconds", label)
+	default:
+		return fmt.Sprintf("%s must be 1–86400 whole seconds", label)
+	}
+}
+
 func (s Settings) Validate() error {
 	if !wholeSecondsInRange(s.Interval, time.Second, MaxDuration) {
-		return fmt.Errorf("work interval must be 1–86400 whole seconds")
+		return ValidationError{Interval}
 	}
-	for _, kind := range [...]Kind{Short, Long} {
-		r := s.Rule(kind)
-		if !wholeSecondsInRange(r.Duration, time.Second, MaxDuration) {
-			return fmt.Errorf("%s duration must be 1–86400 whole seconds", kind.Label())
+	for _, fields := range [...]struct {
+		rule                       Rule
+		duration, notice, postpone Field
+	}{
+		{s.Short, ShortDuration, ShortNotice, ShortPostpone},
+		{s.Long, LongDuration, LongNotice, LongPostpone},
+	} {
+		if !wholeSecondsInRange(fields.rule.Duration, time.Second, MaxDuration) {
+			return ValidationError{fields.duration}
 		}
-		if !wholeSecondsInRange(r.Notice, 0, s.Interval-time.Second) {
-			return fmt.Errorf("%s notice must be less than the work interval", kind.Label())
+		if !wholeSecondsInRange(fields.rule.Notice, 0, s.Interval-time.Second) {
+			return ValidationError{fields.notice}
 		}
-		if !wholeSecondsInRange(r.Postpone, 0, MaxDuration) {
-			return fmt.Errorf("%s postponement must be 0–86400 whole seconds", kind.Label())
+		if !wholeSecondsInRange(fields.rule.Postpone, 0, MaxDuration) {
+			return ValidationError{fields.postpone}
 		}
 	}
 	return nil
