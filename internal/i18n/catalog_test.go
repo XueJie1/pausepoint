@@ -26,6 +26,8 @@ func TestCatalogs(t *testing.T) {
 				switch Key(key) {
 				case ActiveStatus, WaitingStatus:
 					args = []any{"break-kind", "08:23"}
+				case ScheduleSummary:
+					args = []any{"10 min", "20 s", "5 min"}
 				case SecondsLabel, WholeNumberRange, PositiveSeconds, NoticeBelowInterval, NonNegativeSeconds:
 					args = []any{"field-name"}
 				}

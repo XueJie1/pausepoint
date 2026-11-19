@@ -2,6 +2,7 @@ package prefs
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -39,7 +40,11 @@ func TestLoadUnconfirmedSettings(t *testing.T) {
 
 func TestLoadInvalidSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "settings.json")
-	for _, data := range []string{`{`, `null`, `{"interval":0}`, `{"short":{"notice":600}}`, `{"long":{"duration":1.5}}`, `{"interval":9223372036854775807}`, `{"setupConfirmed":"true"}`, `{"language":"unsupported"}`, `{"language":1}`} {
+	for _, data := range []string{
+		`{`, `null`, `{"interval":0}`, `{"short":{"notice":600}}`, `{"long":{"duration":1.5}}`,
+		`{"interval":9223372036854775807}`, `{"setupConfirmed":"true"}`, `{"language":"unsupported"}`, `{"language":1}`,
+		`{"theme":"unsupported"}`, `{"previewShortcut":{"key":"b","shift":true}}`, `{"previewShortcut":{"key":"B"}}`,
+	} {
 		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -74,6 +79,57 @@ func TestSaveReplacesOnlyWithValidSettings(t *testing.T) {
 		if err := json.Unmarshal(data, &saved); err != nil || !saved.SetupConfirmed {
 			t.Fatalf("saved confirmation: got %t, %v", saved.SetupConfirmed, err)
 		}
+	}
+}
+
+func TestReplaceSettingsFileSyncsDirectoryAfterRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := Save(path, Defaults()); err != nil {
+		t.Fatal(err)
+	}
+	data := []byte(`{"interval":120}`)
+	syncFailure := errors.New("test directory sync failure")
+	err := replaceSettingsFile(path, data, func(gotDir string) error {
+		if gotDir != dir {
+			t.Fatalf("directory to sync: got %q, want %q", gotDir, dir)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != string(data) {
+			t.Fatalf("directory sync must follow replacement: got %q, err %v", got, err)
+		}
+		return syncFailure
+	})
+	var durabilityErr *DurabilityError
+	if !errors.As(err, &durabilityErr) || !errors.Is(err, syncFailure) {
+		t.Fatalf("replacement did not report a durability error: %v", err)
+	}
+	got, confirmed, err := Load(path)
+	if err != nil || !confirmed || got.Interval != 2*time.Minute {
+		t.Fatalf("new settings should remain visible: got %+v, confirmed %t, err %v", got, confirmed, err)
+	}
+}
+
+func TestReplaceSettingsFileCleansUpAfterFailedRename(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	if err := os.Mkdir(path, 0700); err != nil {
+		t.Fatal(err)
+	}
+	err := replaceSettingsFile(path, []byte(`{}`), func(string) error {
+		t.Fatal("directory sync must not run if rename failed")
+		return nil
+	})
+	var durabilityErr *DurabilityError
+	if err == nil || errors.As(err, &durabilityErr) {
+		t.Fatalf("expected a rename failure before settings are committed, got %v", err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "settings.json" || !entries[0].IsDir() {
+		t.Fatalf("failed rename left unexpected files: %v", entries)
 	}
 }
 

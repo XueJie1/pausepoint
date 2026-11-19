@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	_ "embed"
 	"log"
 	"os"
@@ -33,30 +32,36 @@ const (
 
 // All desktop state is owned by the MyGo main thread.
 type desktop struct {
-	scheduler    *breaks.Scheduler
-	prefs        prefs.Settings
-	language     i18n.Language
-	path         string
-	draft        settingsDraft
-	settingsInfo formMessage
-	notifyFailed bool
-	lastTick     time.Time
-	state        breaks.State
-	quitting     bool
-	confirmed    bool
-	openSettings bool
+	scheduler       *breaks.Scheduler
+	prefs           prefs.Settings
+	language        i18n.Language
+	path            string
+	draft           settingsDraft
+	settingsInfo    formMessage
+	settingsPage    settingsPage
+	saveAfter       time.Time
+	settingsPending bool
+	discretePending bool
+	notifyFailed    bool
+	state           breaks.State
+	quitting        bool
+	confirmed       bool
+	openSettings    bool
 
-	settings, rest *mygo.Window
-	tray           *mygo.Tray
-	trayStatus     *mygo.MenuItem
-	trayPause      *mygo.MenuItem
-	trayStart      *mygo.MenuItem
-	traySettings   *mygo.MenuItem
-	trayQuit       *mygo.MenuItem
-	trayText       string
+	settings, rest, preview *mygo.Window
+	previewUntil            time.Time
+	previewRecording        bool
+	previewShortcutFocus    ui.Handle
+	tray                    *mygo.Tray
+	trayStatus              *mygo.MenuItem
+	trayPause               *mygo.MenuItem
+	trayStart               *mygo.MenuItem
+	traySettings            *mygo.MenuItem
+	trayQuit                *mygo.MenuItem
+	trayText                string
 
-	notification    *mygo.Notification
-	cancelNotice    context.CancelFunc
+	notifications   *noticeWorker
+	notification    *breakNotice
 	completionSound *audio.Sound
 }
 
@@ -94,7 +99,12 @@ func main() {
 			a.showSettings()
 		}
 	})
-	if err := mygo.App.Run(); err != nil {
+	err = mygo.App.Run()
+	if a.notifications != nil {
+		a.notifications.stop()
+		<-a.notifications.done
+	}
+	if err != nil {
 		log.Fatal(err)
 	}
 }
@@ -107,10 +117,10 @@ func (a *desktop) ready() {
 	} else {
 		a.completionSound = sound
 	}
-	a.lastTick = time.Now()
-	a.scheduler = breaks.New(a.prefs.Settings, a.lastTick)
-	a.state = a.scheduler.State(a.lastTick)
-	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { a.quitting = true })
+	now := time.Now()
+	a.scheduler = breaks.New(a.prefs.Settings, now)
+	a.state = a.scheduler.State(now)
+	mygo.App.OnBeforeQuit(a.beforeQuit)
 	mygo.App.OnQuitCanceled(func() { a.quitting = false })
 	mygo.Power.OnSuspend(func() {
 		a.scheduler.Suspend()
@@ -120,7 +130,8 @@ func (a *desktop) ready() {
 	release := mygo.Power.KeepRunning(a.language.Text(i18n.KeepRunningReason))
 
 	a.settings = mygo.NewWindow(mygo.WindowOptions{
-		Title: "Pausepoint", Width: 610, Height: 590, MinWidth: 540, MinHeight: 440,
+		Title: "Pausepoint", Width: 860, Height: 660, MinWidth: 680, MinHeight: 460,
+		TitleBarStyle: mygo.TitleBarHidden, TitleBarHeight: 38,
 		Hidden: true, Content: ui.View(a.settingsView),
 	})
 	a.settings.OnClose(func(e *mygo.CloseEvent) {
@@ -128,10 +139,15 @@ func (a *desktop) ready() {
 			return
 		}
 		e.PreventDefault()
-		a.settings.Hide()
+		a.closeSettings()
 	})
+	a.settings.OnHide(func() {
+		a.previewRecording = false
+		a.hidePreview()
+	})
+	a.updateWindowButtons()
 	a.rest = mygo.NewWindow(mygo.WindowOptions{
-		Title: a.language.Text(i18n.BreakWindowTitle), Width: 460, Height: 330, Hidden: true,
+		Title: a.language.Text(i18n.BreakWindowTitle), Width: breakWindowWidth, Height: breakWindowHeight, Hidden: true,
 		AlwaysOnTop: true, SkipTaskbar: true, DisableMinimize: true, DisableMaximize: true,
 		Content: ui.View(a.breakView),
 	})
@@ -148,14 +164,21 @@ func (a *desktop) ready() {
 	})
 
 	a.installTray()
-	a.refresh(a.lastTick)
+	a.refresh(now)
 	if a.openSettings || !a.confirmed || a.tray == nil {
 		a.showSettings()
 	}
+	a.notifications = newNoticeWorker(newBreakNotifier(), func(notice *breakNotice) {
+		mygo.RunOnMain(func() { a.noticeFailed(notice) })
+	})
 	done := make(chan struct{})
 	mygo.App.OnQuit(func() {
 		close(done)
-		a.clearNotice()
+		a.notification = nil
+		a.notifications.stop()
+		if backend, ok := a.notifications.backend.(interface{ closeOnQuit() }); ok {
+			backend.closeOnQuit()
+		}
 		release()
 	})
 	go func() {
@@ -197,23 +220,40 @@ func (a *desktop) installTray() {
 }
 
 func (a *desktop) updateLanguage() {
-	language := resolveLanguage(a.prefs.Language, mygo.App.PreferredLanguages())
+	var preferred []string
+	if a.prefs.Language == i18n.System && a.settings != nil {
+		preferred = mygo.App.PreferredLanguages()
+	}
+	language := resolveLanguage(a.prefs.Language, preferred)
 	if language == a.language {
 		return
 	}
 	a.language = language
-	a.rest.SetTitle(language.Text(i18n.BreakWindowTitle))
+	if a.rest != nil {
+		a.rest.SetTitle(language.Text(i18n.BreakWindowTitle))
+	}
 	if a.tray != nil {
 		a.trayPause.SetLabel(pauseLabel(language, a.state))
 		a.trayStart.SetLabel(language.Text(i18n.StartBreakNow))
 		a.traySettings.SetLabel(language.Text(i18n.TraySettings))
 		a.trayQuit.SetLabel(language.Text(i18n.Quit))
 	}
-	a.settings.Invalidate()
+	if a.settings != nil {
+		a.settings.Invalidate()
+	}
 }
 
 func menuAction(fn func()) func(*mygo.MenuItem, *mygo.Window) {
 	return func(*mygo.MenuItem, *mygo.Window) { fn() }
+}
+
+func (a *desktop) closeSettings() {
+	a.flushSettings()
+	if !a.settingsLocked() && !a.confirmed && a.settingsInfo.key == 0 && a.draft == newDraft(a.prefs) {
+		a.settingsPending = true
+		a.commitPendingSettings(time.Now())
+	}
+	a.settings.Hide()
 }
 
 func (a *desktop) showSettings() {
@@ -227,14 +267,22 @@ func (a *desktop) showSettings() {
 	a.settings.Show()
 }
 
-func (a *desktop) tick(now time.Time) {
-	// Wall time includes system sleep even where Go's monotonic clock stops.
-	wallGap := now.Round(0).Sub(a.lastTick.Round(0))
-	if wallGap > 15*time.Second || wallGap < -time.Second {
-		a.wake(now)
+func (a *desktop) beforeQuit(e *mygo.QuitEvent) {
+	// Pending edits were accepted before the UI was locked.
+	if !a.commitPendingSettings(time.Now()) && !e.SessionEnding {
+		e.PreventDefault()
+		a.showSettings()
 		return
 	}
-	a.lastTick = now
+	a.quitting = true
+}
+
+func (a *desktop) tick(now time.Time) {
+	if !a.settingsLocked() && !a.saveAfter.IsZero() && !now.Before(a.saveAfter) {
+		a.commitPendingSettings(now)
+	}
+	// time.Now carries monotonic time. Advance handles missed ticks without
+	// treating a delayed frame or a wall-clock adjustment as a power event.
 	wasActive := a.state.Phase == breaks.Active
 	notice := a.scheduler.Advance(now)
 	a.refresh(now)
@@ -247,7 +295,6 @@ func (a *desktop) tick(now time.Time) {
 }
 
 func (a *desktop) wake(now time.Time) {
-	a.lastTick = now
 	a.clearNotice()
 	a.scheduler.Wake(now)
 	a.refresh(now)
@@ -256,16 +303,22 @@ func (a *desktop) wake(now time.Time) {
 func (a *desktop) refresh(now time.Time) {
 	previous := a.state
 	a.state = a.scheduler.State(now)
+	a.refreshPreview(now)
+	if a.settingsLocked() {
+		a.previewRecording = false
+	}
 	if a.state.Phase != breaks.Waiting {
 		a.clearNotice()
 	}
-	if a.state.Phase == breaks.Active && previous.Phase != breaks.Active {
-		a.rest.Show()
-	} else if a.state.Phase != breaks.Active && previous.Phase == breaks.Active {
-		a.rest.Hide()
-	}
-	if a.state.Phase == breaks.Active {
-		a.rest.Invalidate()
+	if a.rest != nil {
+		if a.state.Phase == breaks.Active {
+			if previous.Phase != breaks.Active {
+				a.rest.Show()
+			}
+			a.rest.Invalidate()
+		} else if previous.Phase == breaks.Active {
+			a.rest.Hide()
+		}
 	}
 	text := statusText(a.language, a.state)
 	if a.tray != nil {
@@ -280,7 +333,7 @@ func (a *desktop) refresh(now time.Time) {
 			a.trayStart.SetEnabled(a.state.Phase == breaks.Waiting)
 		}
 	}
-	if a.settings.IsVisible() && (text != statusText(a.language, previous) || previous.CanSkip != a.state.CanSkip) {
+	if a.settings != nil && a.settings.IsVisible() && (text != statusText(a.language, previous) || previous.CanSkip != a.state.CanSkip) {
 		a.settings.Invalidate()
 	}
 }
@@ -317,31 +370,29 @@ func (a *desktop) postpone() {
 }
 
 func (a *desktop) showNotice() {
-	a.clearNotice()
-	note := mygo.NewNotification(mygo.NotificationOptions{
-		Title: "Pausepoint", Body: statusText(a.language, a.state),
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), a.state.Remaining)
-	a.notification, a.cancelNotice = note, cancel
-	go func() {
-		err := note.ShowContext(ctx)
-		if err != nil && ctx.Err() == nil {
-			log.Print("advance notice: ", err)
-			mygo.RunOnMain(func() {
-				if a.notification == note && !a.quitting {
-					a.notifyFailed = true
-					a.settings.Invalidate()
-				}
-			})
+	if a.notifications == nil || a.state.Remaining <= 0 {
+		return
+	}
+	notice := &breakNotice{
+		title: "Pausepoint", body: statusText(a.language, a.state),
+		expires: time.Now().Add(a.state.Remaining), actions: []string{"default", "Open"},
+	}
+	a.notification = notice
+	a.notifications.update(notice)
+}
+
+func (a *desktop) noticeFailed(notice *breakNotice) {
+	if a.notification == notice && !a.quitting {
+		a.notifyFailed = true
+		if a.settings != nil {
+			a.settings.Invalidate()
 		}
-	}()
+	}
 }
 
 func (a *desktop) clearNotice() {
 	if a.notification != nil {
-		a.cancelNotice()
-		a.notification.Close()
 		a.notification = nil
-		a.cancelNotice = nil
+		a.notifications.update(nil)
 	}
 }

@@ -37,14 +37,15 @@ type State struct {
 
 // Scheduler is driven by a single caller supplying timestamps.
 type Scheduler struct {
-	settings  Settings
-	phase     Phase
-	shorts    int
-	deadline  time.Time
-	started   time.Time
-	noticeAt  time.Time
-	postponed bool
-	sleeping  bool
+	settings   Settings
+	activeRule Rule
+	phase      Phase
+	shorts     int
+	deadline   time.Time
+	started    time.Time
+	noticeAt   time.Time
+	postponed  bool
+	sleeping   bool
 }
 
 func New(settings Settings, now time.Time) *Scheduler {
@@ -71,7 +72,7 @@ func (s *Scheduler) State(now time.Time) State {
 	}
 	state.Remaining = max(0, s.deadline.Sub(now))
 	if s.phase == Active {
-		rule := s.settings.Rule(state.Kind)
+		rule := s.activeRule
 		state.Duration = rule.Duration
 		state.CanSkip = !rule.Strict && state.Remaining > 0
 		state.CanPostpone = state.CanSkip && rule.Postpone > 0 && !s.postponed && now.Sub(s.started) < rule.Duration*3/10
@@ -107,7 +108,8 @@ func (s *Scheduler) Start(now time.Time) bool {
 	}
 	s.phase = Active
 	s.started = now
-	s.deadline = now.Add(s.settings.Rule(s.kind()).Duration)
+	s.activeRule = s.settings.Rule(s.kind())
+	s.deadline = now.Add(s.activeRule.Duration)
 	s.noticeAt = time.Time{}
 	return true
 }
@@ -124,14 +126,13 @@ func (s *Scheduler) Postpone(now time.Time) bool {
 	if !s.State(now).CanPostpone {
 		return false
 	}
-	rule := s.settings.Rule(s.kind())
-	s.wait(now, rule.Postpone)
+	s.wait(now, s.activeRule.Postpone)
 	s.postponed = true
 	return true
 }
 
 func (s *Scheduler) Pause() bool {
-	if s.sleeping || s.phase == Paused || (s.phase == Active && s.settings.Rule(s.kind()).Strict) {
+	if s.sleeping || s.phase == Paused || (s.phase == Active && s.activeRule.Strict) {
 		return false
 	}
 	s.phase = Paused
@@ -157,20 +158,17 @@ func (s *Scheduler) Wake(now time.Time) {
 	}
 }
 
-// Reconfigure starts a fresh cycle, preserving a manual pause.
-// The caller supplies validated preferences.
-func (s *Scheduler) Reconfigure(settings Settings, now time.Time) bool {
-	if s.phase == Active || s.sleeping {
-		return false
-	}
+// Reconfigure starts a fresh cycle when waiting. An active break keeps the rule
+// it started with. A suspended or paused schedule uses the new settings when it
+// resets on wake or resume. The caller supplies validated preferences.
+func (s *Scheduler) Reconfigure(settings Settings, now time.Time) {
 	if s.settings == settings {
-		return true
+		return
 	}
 	s.settings = settings
-	if s.phase != Paused {
+	if s.phase == Waiting && !s.sleeping {
 		s.reset(now)
 	}
-	return true
 }
 
 func (s *Scheduler) reset(now time.Time) {

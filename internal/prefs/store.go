@@ -16,7 +16,34 @@ import (
 // Settings holds the schedule and desktop preferences.
 type Settings struct {
 	breaks.Settings
-	Language i18n.Language
+	Language        i18n.Language
+	Theme           Theme
+	PreviewShortcut Shortcut
+}
+
+// Theme is the appearance preference. Its zero value selects the default dark palette.
+type Theme string
+
+const (
+	ThemeDark   Theme = ""
+	ThemeSystem Theme = "system"
+	ThemeLight  Theme = "light"
+)
+
+// Shortcut describes the window-local preview shortcut. The platform's primary
+// shortcut modifier is implicit. The zero value selects the default shortcut.
+type Shortcut struct {
+	Key   string `json:"key"`
+	Shift bool   `json:"shift,omitempty"`
+	Alt   bool   `json:"alt,omitempty"`
+}
+
+func (s Shortcut) Valid() bool {
+	if s == (Shortcut{}) {
+		return true
+	}
+	return (s.Shift || s.Alt) && len(s.Key) == 1 &&
+		(s.Key[0] >= 'A' && s.Key[0] <= 'Z' || s.Key[0] >= '0' && s.Key[0] <= '9')
 }
 
 func Defaults() Settings {
@@ -27,16 +54,26 @@ func (s Settings) Validate() error {
 	if !s.Language.Valid() {
 		return fmt.Errorf("unsupported language %q", s.Language)
 	}
+	switch s.Theme {
+	case ThemeDark, ThemeSystem, ThemeLight:
+	default:
+		return fmt.Errorf("unsupported theme %q", s.Theme)
+	}
+	if !s.PreviewShortcut.Valid() {
+		return errors.New("invalid preview shortcut")
+	}
 	return s.Settings.Validate()
 }
 
 // Store whole seconds as int32 so even invalid inputs convert without overflowing time.Duration.
 type fileSettings struct {
-	Interval       int32         `json:"interval"`
-	Short          fileRule      `json:"short"`
-	Long           fileRule      `json:"long"`
-	SetupConfirmed bool          `json:"setupConfirmed"`
-	Language       i18n.Language `json:"language,omitempty"`
+	Interval        int32         `json:"interval"`
+	Short           fileRule      `json:"short"`
+	Long            fileRule      `json:"long"`
+	SetupConfirmed  bool          `json:"setupConfirmed"`
+	Language        i18n.Language `json:"language,omitempty"`
+	Theme           Theme         `json:"theme,omitempty"`
+	PreviewShortcut Shortcut      `json:"previewShortcut,omitzero"`
 }
 
 type fileRule struct {
@@ -51,11 +88,13 @@ func encode(s Settings) fileSettings {
 		return fileRule{int32(r.Duration / time.Second), int32(r.Notice / time.Second), int32(r.Postpone / time.Second), r.Strict}
 	}
 	return fileSettings{
-		Interval:       int32(s.Interval / time.Second),
-		Short:          rule(s.Short),
-		Long:           rule(s.Long),
-		SetupConfirmed: true,
-		Language:       s.Language,
+		Interval:        int32(s.Interval / time.Second),
+		Short:           rule(s.Short),
+		Long:            rule(s.Long),
+		SetupConfirmed:  true,
+		Language:        s.Language,
+		Theme:           s.Theme,
+		PreviewShortcut: s.PreviewShortcut,
 	}
 }
 
@@ -69,8 +108,10 @@ func (f fileSettings) decode() Settings {
 		}
 	}
 	return Settings{
-		Settings: breaks.Settings{Interval: time.Duration(f.Interval) * time.Second, Short: rule(f.Short), Long: rule(f.Long)},
-		Language: f.Language,
+		Settings:        breaks.Settings{Interval: time.Duration(f.Interval) * time.Second, Short: rule(f.Short), Long: rule(f.Long)},
+		Language:        f.Language,
+		Theme:           f.Theme,
+		PreviewShortcut: f.PreviewShortcut,
 	}
 }
 
@@ -108,7 +149,17 @@ func Load(path string) (Settings, bool, error) {
 	return settings, encoded.SetupConfirmed, nil
 }
 
+// DurabilityError reports a replacement that succeeded but could not be made
+// durable because its parent directory could not be synced.
+type DurabilityError struct{ Err error }
+
+func (e *DurabilityError) Error() string {
+	return "settings replaced but directory sync failed: " + e.Err.Error()
+}
+func (e *DurabilityError) Unwrap() error { return e.Err }
+
 // Save validates and writes settings, recording that setup has been confirmed.
+// A DurabilityError means the new settings are already visible at path.
 func Save(path string, settings Settings) error {
 	if err := settings.Validate(); err != nil {
 		return err
@@ -117,6 +168,10 @@ func Save(path string, settings Settings) error {
 	if err != nil {
 		return err
 	}
+	return replaceSettingsFile(path, append(data, '\n'), syncSettingsDir)
+}
+
+func replaceSettingsFile(path string, data []byte, syncDir func(string) error) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
@@ -126,10 +181,18 @@ func Save(path string, settings Settings) error {
 		return err
 	}
 	defer os.Remove(file.Name())
-	_, writeErr := file.Write(append(data, '\n'))
-	closeErr := file.Close()
-	if err := errors.Join(writeErr, closeErr); err != nil {
+	_, err = file.Write(data)
+	if err == nil {
+		err = file.Sync()
+	}
+	if err := errors.Join(err, file.Close()); err != nil {
 		return err
 	}
-	return os.Rename(file.Name(), path)
+	if err := os.Rename(file.Name(), path); err != nil {
+		return err
+	}
+	if err := syncDir(dir); err != nil {
+		return &DurabilityError{Err: err}
+	}
+	return nil
 }

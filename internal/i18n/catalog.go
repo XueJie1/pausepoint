@@ -90,12 +90,41 @@ const (
 	LoadFailed
 	ConfigUnavailable
 	SaveFailed
+	SaveDurabilityUncertain
 	Saved
 	NotificationsUnavailable
 	WholeNumberRange
 	PositiveSeconds
 	NoticeBelowInterval
 	NonNegativeSeconds
+	General
+	Appearance
+	RemindersEnabled
+	LanguageHelp
+	DurationHelp
+	NoticeHelp
+	PostponeHelp
+	StrictMode
+	StrictHelp
+	SecondsUnit
+	ScheduleSummary
+	ThemeLabel
+	ThemeHelp
+	ThemeSystem
+	ThemeDark
+	ThemeLight
+	PreviewBreak
+	PreviewTitle
+	SettingsLocked
+	AutoSaveHelp
+	MinutesUnit
+	HoursUnit
+	Shortcuts
+	PreviewShortcutHelp
+	RecordShortcut
+	RecordingShortcut
+	ShortcutInvalid
+	ResetShortcut
 	keyCount
 )
 

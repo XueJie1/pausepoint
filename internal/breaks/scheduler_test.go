@@ -74,7 +74,8 @@ func TestPauseAndStrictMode(t *testing.T) {
 	settings.Short.Strict = true
 	s := New(settings, origin)
 	s.Start(origin)
-	if s.Pause() || s.Skip(origin) || s.Postpone(origin) || s.Reconfigure(Defaults(), origin) {
+	s.Reconfigure(Defaults(), origin)
+	if s.Pause() || s.Skip(origin) || s.Postpone(origin) {
 		t.Fatal("a strict break could be interrupted")
 	}
 	s.Advance(origin.Add(20 * time.Second))
@@ -107,6 +108,53 @@ func TestWakeDiscardsActiveAndMissedBreaks(t *testing.T) {
 	late := now.Add(11 * time.Minute)
 	if s.Advance(late) || s.State(late).Remaining != 20*time.Second {
 		t.Fatal("a late tick should start the break without a stale notice")
+	}
+}
+
+func TestReconfigureDuringPausedSuspend(t *testing.T) {
+	s := New(Defaults(), origin)
+	s.Pause()
+	s.Suspend()
+	settings := Defaults()
+	settings.Interval = 25 * time.Minute
+	s.Reconfigure(settings, origin.Add(time.Second))
+
+	wake := origin.Add(time.Hour)
+	s.Wake(wake)
+	if got := s.State(wake); got.Phase != Paused {
+		t.Fatalf("wake ended manual pause: %+v", got)
+	}
+	if !s.Resume(wake) {
+		t.Fatal("could not resume after wake")
+	}
+	if got := s.State(wake); got.Phase != Waiting || got.Remaining != settings.Interval {
+		t.Fatalf("resume did not use new settings: %+v", got)
+	}
+}
+
+func TestReconfigureDuringBreakAppliesToLaterBreaks(t *testing.T) {
+	s := New(Defaults(), origin)
+	s.Start(origin)
+	now := origin.Add(time.Second)
+	before := s.State(now)
+	settings := Defaults()
+	settings.Interval = 25 * time.Minute
+	settings.Short.Duration = 40 * time.Second
+	settings.Short.Postpone = 0
+	settings.Short.Strict = true
+	s.Reconfigure(settings, now)
+	if got := s.State(now); got != before {
+		t.Fatalf("reconfigure changed active break: before %+v, after %+v", before, got)
+	}
+
+	end := origin.Add(Defaults().Short.Duration)
+	s.Advance(end)
+	if got := s.State(end); got.Phase != Waiting || got.Remaining != settings.Interval {
+		t.Fatalf("work interval did not use new settings: %+v", got)
+	}
+	s.Start(end)
+	if got := s.State(end); got.Phase != Active || got.Duration != settings.Short.Duration || got.CanSkip || got.CanPostpone {
+		t.Fatalf("next break did not use new rule: %+v", got)
 	}
 }
 
