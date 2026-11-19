@@ -84,7 +84,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: [build-linux-windows, build-macos]
+    needs: build-linux-windows
     runs-on: ubuntu-24.04
     steps:
       - name: Download Linux and Windows packages
@@ -107,4 +107,23 @@ jobs:
             release/* \
             --repo "${GITHUB_REPOSITORY}" \
             --title "Pausepoint ${GITHUB_REF_NAME}" \
-            --generate-notes
+            --generate-notes \
+            --prerelease
+
+  upload-macos:
+    needs: [build-macos, publish]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download macOS package
+        uses: actions/download-artifact@v8
+        with:
+          name: pausepoint-macos
+          path: release
+
+      - name: Upload macOS package to Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" \
+            release/* \
+            --repo "${GITHUB_REPOSITORY}"
