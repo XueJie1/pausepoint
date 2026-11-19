@@ -1,0 +1,101 @@
+name: macOS DMG
+
+on:
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: Sign with Developer ID and notarize with Apple
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+
+      - name: Import signing and notarization credentials
+        if: inputs.notarize
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          : "${MACOS_CERTIFICATE:?Set the MACOS_CERTIFICATE secret}"
+          : "${MACOS_CERTIFICATE_PASSWORD:?Set the MACOS_CERTIFICATE_PASSWORD secret}"
+          : "${MACOS_SIGNING_IDENTITY:?Set the MACOS_SIGNING_IDENTITY variable}"
+          : "${APPLE_ID:?Set the APPLE_ID secret}"
+          : "${APPLE_TEAM_ID:?Set the APPLE_TEAM_ID secret}"
+          : "${APPLE_APP_PASSWORD:?Set the APPLE_APP_PASSWORD secret}"
+
+          keychain="$RUNNER_TEMP/pausepoint-signing.keychain-db"
+          password="$(openssl rand -hex 24)"
+          echo "::add-mask::$password"
+          cert="$(mktemp "$RUNNER_TEMP/pausepoint-cert.XXXXXX")"
+          trap 'rm -f "$cert"' EXIT
+          printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$cert"
+
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security import "$cert" -f pkcs12 -k "$keychain" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain
+          xcrun notarytool store-credentials pausepoint-notary --keychain "$keychain" \
+            --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD"
+
+          jq --arg keychain "$keychain" \
+            '.macos.notarize = {keychainProfile: "pausepoint-notary", keychain: $keychain}' \
+            mygo.json > mygo.ci.json
+          mv mygo.ci.json mygo.json
+
+      - name: Build and verify universal DMG
+        shell: bash
+        env:
+          SIGN_AND_NOTARIZE: ${{ inputs.notarize }}
+          MACOS_SIGNING_IDENTITY: ${{ vars.MACOS_SIGNING_IDENTITY }}
+        run: |
+          identity="-"
+          if [[ "$SIGN_AND_NOTARIZE" == true ]]; then
+            identity="$MACOS_SIGNING_IDENTITY"
+          fi
+          go tool mygo build -platform darwin/universal -sign "$identity"
+
+          app=build/darwin-universal/Pausepoint.app
+          dmg="build/darwin-universal/pausepoint-$(jq -r '.version' mygo.json).dmg"
+          lipo -verify_arch x86_64 arm64 "$app/Contents/MacOS/Pausepoint"
+          codesign --verify --deep --strict "$app"
+          hdiutil verify "$dmg"
+          if [[ "$SIGN_AND_NOTARIZE" == true ]]; then
+            codesign --verify --strict "$dmg"
+            xcrun stapler validate "$app"
+            xcrun stapler validate "$dmg"
+          fi
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: ${{ inputs.notarize && 'pausepoint-macos-universal-notarized' || 'pausepoint-macos-universal-test' }}
+          path: build/darwin-universal/*.dmg
+          if-no-files-found: error
+
+      - name: Remove temporary keychain
+        if: always() && inputs.notarize
+        run: |
+          keychain="$RUNNER_TEMP/pausepoint-signing.keychain-db"
+          if [[ -f "$keychain" ]]; then
+            security delete-keychain "$keychain"
+          fi

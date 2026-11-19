@@ -1,0 +1,13 @@
+{
+  "name": "Pausepoint",
+  "identifier": "dev.pausepoint.app",
+  "version": "0.1.0",
+  "out": "build",
+  "macos": {
+    "minimumSystemVersion": "13.0"
+  },
+  "linux": {
+    "webview": false,
+    "depends": ["libayatana-appindicator3-1"]
+  }
+}
