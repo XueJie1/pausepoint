@@ -61,6 +61,10 @@ go tool mygo build -platform darwin/universal,windows/amd64,windows/arm64,linux/
 
 正式构建会验证应用和磁盘映像的签名及公证票据，再上传 DMG。配置见 [macOS 构建工作流](.github/workflows/macos.yml)。
 
+## 许可证
+
+Pausepoint 源代码采用 [MIT 许可证](LICENSE)。随附的 MyGo 许可和休息提示音的 Freesound 署名及许可见[第三方声明](resources/THIRD-PARTY-NOTICES.txt)。
+
 ## 开发与范围
 
 ```sh

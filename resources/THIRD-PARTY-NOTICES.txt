@@ -1,0 +1,16 @@
+Third-party notices for Pausepoint
+
+MyGo is licensed under the MIT License. See MyGo-LICENSE.txt.
+
+Break completion sound (sound/din-ding.wav)
+
+Original: "ding.wav" by tim.kahn (formerly Corsica_S).
+Source: https://freesound.org/people/tim.kahn/sounds/91926/
+License: Creative Commons Attribution 4.0 International (CC BY 4.0).
+https://creativecommons.org/licenses/by/4.0/
+
+Adaptation: "din-ding.wav" by Daenn. Daenn doubled the beginning and
+slightly altered the ending in Audacity.
+Source: https://freesound.org/people/Daenn/sounds/159158/
+Daenn published the adaptation under CC0 1.0 Universal.
+https://creativecommons.org/publicdomain/zero/1.0/

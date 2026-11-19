@@ -3,6 +3,9 @@
   "identifier": "dev.pausepoint.app",
   "version": "0.1.0",
   "out": "build",
+  "license": "MIT",
+  "resources": ["LICENSE"],
+  "resourcesExclude": ["sound/logo.jpeg"],
   "macos": {
     "minimumSystemVersion": "13.0"
   },
