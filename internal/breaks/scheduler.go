@@ -44,6 +44,7 @@ type Scheduler struct {
 	deadline   time.Time
 	started    time.Time
 	noticeAt   time.Time
+	noticeSent bool
 	postponed  bool
 	sleeping   bool
 }
@@ -80,6 +81,18 @@ func (s *Scheduler) State(now time.Time) State {
 	return state
 }
 
+// NextDeadline returns the next transition and whether the current wait is in
+// the advance notice countdown. Paused and suspended schedules have no deadline.
+func (s *Scheduler) NextDeadline() (at time.Time, inNotice bool) {
+	if s.sleeping || s.phase == Paused {
+		return time.Time{}, false
+	}
+	if s.phase == Waiting && !s.noticeAt.IsZero() && !s.noticeSent {
+		return s.noticeAt, false
+	}
+	return s.deadline, s.phase == Waiting && s.noticeSent
+}
+
 // Advance applies at most one transition and reports a newly due advance notice.
 // If the notice was missed, the break starts directly.
 func (s *Scheduler) Advance(now time.Time) (notice bool) {
@@ -94,8 +107,8 @@ func (s *Scheduler) Advance(now time.Time) (notice bool) {
 		}
 		return false
 	}
-	if s.phase == Waiting && !s.noticeAt.IsZero() && !now.Before(s.noticeAt) {
-		s.noticeAt = time.Time{}
+	if s.phase == Waiting && !s.noticeAt.IsZero() && !s.noticeSent && !now.Before(s.noticeAt) {
+		s.noticeSent = true
 		return true
 	}
 	return false
@@ -185,6 +198,7 @@ func (s *Scheduler) wait(now time.Time, delay time.Duration) {
 	s.phase = Waiting
 	s.deadline = now.Add(delay)
 	s.noticeAt = time.Time{}
+	s.noticeSent = false
 	if lead := s.settings.Rule(s.kind()).Notice; lead > 0 && lead < delay {
 		s.noticeAt = s.deadline.Add(-lead)
 	}

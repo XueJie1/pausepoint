@@ -136,8 +136,12 @@ func viewDirection(language i18n.Language) ui.Direction {
 	return ui.LeftToRight
 }
 
+func countdownSeconds(d time.Duration) int {
+	return int((max(0, d) + time.Second - 1) / time.Second)
+}
+
 func countdown(d time.Duration) string {
-	seconds := int((max(0, d) + time.Second - 1) / time.Second)
+	seconds := countdownSeconds(d)
 	if seconds >= 3600 {
 		return fmt.Sprintf("%d:%02d:%02d", seconds/3600, seconds/60%60, seconds%60)
 	}
@@ -149,6 +153,16 @@ func breakLabel(kind breaks.Kind) i18n.Key {
 		return i18n.LongBreak
 	}
 	return i18n.ShortBreak
+}
+
+func statusChanged(previous, current breaks.State) bool {
+	if previous.Phase != current.Phase {
+		return true
+	}
+	if current.Phase == breaks.Paused || current.Phase == breaks.Sleeping {
+		return false
+	}
+	return previous.Kind != current.Kind || countdownSeconds(previous.Remaining) != countdownSeconds(current.Remaining)
 }
 
 func statusText(language i18n.Language, s breaks.State) string {

@@ -17,6 +17,7 @@ func (a *desktop) settingsLocked() bool {
 func (a *desktop) scheduleSettingsSave() {
 	a.settingsPending = true
 	a.saveAfter = time.Now().Add(450 * time.Millisecond)
+	a.scheduleTick()
 }
 
 func (a *desktop) saveDiscreteSettings() {

@@ -206,7 +206,7 @@ func (a *desktop) showPreview() {
 			Parent: a.settings, SkipTaskbar: true, DisableMinimize: true, DisableMaximize: true,
 			Content: ui.View(a.previewView),
 		})
-		if err := a.preview.SetIcon(appIcon); err != nil {
+		if err := a.preview.SetIcon(windowIcon); err != nil {
 			log.Print("set preview window icon: ", err)
 		}
 		a.preview.OnClose(func(e *mygo.CloseEvent) {
@@ -220,6 +220,7 @@ func (a *desktop) showPreview() {
 	a.preview.SetTitle(a.language.Text(i18n.PreviewTitle))
 	a.preview.Show()
 	a.preview.Invalidate()
+	a.scheduleTick()
 }
 
 func (a *desktop) hidePreview() {
@@ -227,6 +228,7 @@ func (a *desktop) hidePreview() {
 	if a.preview != nil {
 		a.preview.Hide()
 	}
+	a.scheduleTick()
 }
 
 func (a *desktop) refreshPreview(now time.Time) {

@@ -16,8 +16,10 @@ import (
 	"pausepoint/internal/prefs"
 )
 
-//go:embed resources/icon.png
-var appIcon []byte
+// windowIcon is a 256x256 derivative of the packaging icon in resources/icon.png.
+//
+//go:embed internal/assets/window-icon.png
+var windowIcon []byte
 
 //go:embed resources/tray.png
 var trayIcon []byte
@@ -25,10 +27,7 @@ var trayIcon []byte
 //go:embed resources/sound/din-ding.wav
 var completionWAV []byte
 
-const (
-	tickInterval = 250 * time.Millisecond
-	settingsArg  = "--settings"
-)
+const settingsArg = "--settings"
 
 // All desktop state is owned by the MyGo main thread.
 type desktop struct {
@@ -47,6 +46,9 @@ type desktop struct {
 	quitting        bool
 	confirmed       bool
 	openSettings    bool
+	ticksRunning    bool
+	tickAt          time.Time
+	tickTimer       *time.Timer
 
 	settings, rest, preview *mygo.Window
 	previewUntil            time.Time
@@ -121,7 +123,10 @@ func (a *desktop) ready() {
 	a.scheduler = breaks.New(a.prefs.Settings, now)
 	a.state = a.scheduler.State(now)
 	mygo.App.OnBeforeQuit(a.beforeQuit)
-	mygo.App.OnQuitCanceled(func() { a.quitting = false })
+	mygo.App.OnQuitCanceled(func() {
+		a.quitting = false
+		a.scheduleTick()
+	})
 	mygo.Power.OnSuspend(func() {
 		a.scheduler.Suspend()
 		a.refresh(time.Now())
@@ -145,6 +150,7 @@ func (a *desktop) ready() {
 		a.previewRecording = false
 		a.hidePreview()
 	})
+	a.settings.OnShow(a.scheduleTick)
 	a.updateWindowButtons()
 	a.rest = mygo.NewWindow(mygo.WindowOptions{
 		Title: a.language.Text(i18n.BreakWindowTitle), Width: breakWindowWidth, Height: breakWindowHeight, Hidden: true,
@@ -152,7 +158,7 @@ func (a *desktop) ready() {
 		Content: ui.View(a.breakView),
 	})
 	for _, window := range []*mygo.Window{a.settings, a.rest} {
-		if err := window.SetIcon(appIcon); err != nil {
+		if err := window.SetIcon(windowIcon); err != nil {
 			log.Print("set window icon: ", err)
 		}
 	}
@@ -171,9 +177,9 @@ func (a *desktop) ready() {
 	a.notifications = newNoticeWorker(newBreakNotifier(), func(notice *breakNotice) {
 		mygo.RunOnMain(func() { a.noticeFailed(notice) })
 	})
-	done := make(chan struct{})
 	mygo.App.OnQuit(func() {
-		close(done)
+		a.ticksRunning = false
+		a.stopTick()
 		a.notification = nil
 		a.notifications.stop()
 		if backend, ok := a.notifications.backend.(interface{ closeOnQuit() }); ok {
@@ -181,32 +187,19 @@ func (a *desktop) ready() {
 		}
 		release()
 	})
-	go func() {
-		ticker := time.NewTicker(tickInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-ticker.C:
-				mygo.RunOnMain(func() {
-					if !a.quitting {
-						a.tick(time.Now())
-					}
-				})
-			}
-		}
-	}()
+	a.ticksRunning = true
+	a.scheduleTick()
 }
 
 func (a *desktop) installTray() {
-	a.trayStatus = &mygo.MenuItem{Label: statusText(a.language, a.state), Disabled: true}
-	a.trayPause = &mygo.MenuItem{Label: pauseLabel(a.language, a.state), Click: menuAction(a.togglePause)}
-	a.trayStart = &mygo.MenuItem{Label: a.language.Text(i18n.StartBreakNow), Click: menuAction(a.startBreak)}
+	a.trayText = statusText(a.language, a.state)
+	a.trayStatus = &mygo.MenuItem{Label: a.trayText, Disabled: true}
+	a.trayPause = &mygo.MenuItem{Label: pauseLabel(a.language, a.state), Disabled: !canTogglePause(a.state), Click: menuAction(a.togglePause)}
+	a.trayStart = &mygo.MenuItem{Label: a.language.Text(i18n.StartBreakNow), Disabled: a.state.Phase != breaks.Waiting, Click: menuAction(a.startBreak)}
 	a.traySettings = &mygo.MenuItem{Label: a.language.Text(i18n.TraySettings), Click: menuAction(a.showSettings)}
 	a.trayQuit = &mygo.MenuItem{Label: a.language.Text(i18n.Quit), Role: mygo.RoleQuit}
 	tray, err := mygo.NewTray(mygo.TrayOptions{
-		ID: "pausepoint", Icon: trayIcon, ToolTip: "Pausepoint",
+		ID: "pausepoint", Icon: trayIcon, ToolTip: "Pausepoint · " + a.trayText,
 		Menu: mygo.NewMenu([]*mygo.MenuItem{
 			a.trayStatus, a.trayPause, a.trayStart, mygo.Separator(), a.traySettings, a.trayQuit,
 		}),
@@ -233,10 +226,11 @@ func (a *desktop) updateLanguage() {
 		a.rest.SetTitle(language.Text(i18n.BreakWindowTitle))
 	}
 	if a.tray != nil {
-		a.trayPause.SetLabel(pauseLabel(language, a.state))
-		a.trayStart.SetLabel(language.Text(i18n.StartBreakNow))
-		a.traySettings.SetLabel(language.Text(i18n.TraySettings))
-		a.trayQuit.SetLabel(language.Text(i18n.Quit))
+		a.updateTrayStatus()
+		setMenuLabel(a.trayPause, pauseLabel(language, a.state))
+		setMenuLabel(a.trayStart, language.Text(i18n.StartBreakNow))
+		setMenuLabel(a.traySettings, language.Text(i18n.TraySettings))
+		setMenuLabel(a.trayQuit, language.Text(i18n.Quit))
 	}
 	if a.settings != nil {
 		a.settings.Invalidate()
@@ -275,6 +269,7 @@ func (a *desktop) beforeQuit(e *mygo.QuitEvent) {
 		return
 	}
 	a.quitting = true
+	a.stopTick()
 }
 
 func (a *desktop) tick(now time.Time) {
@@ -320,21 +315,41 @@ func (a *desktop) refresh(now time.Time) {
 			a.rest.Hide()
 		}
 	}
-	text := statusText(a.language, a.state)
+	statusDirty := statusChanged(previous, a.state)
 	if a.tray != nil {
-		if text != a.trayText {
-			a.trayText = text
-			a.trayStatus.SetLabel(text)
-			a.tray.SetToolTip("Pausepoint · " + text)
+		if statusDirty {
+			a.updateTrayStatus()
 		}
 		if previous.Phase != a.state.Phase || previous.CanSkip != a.state.CanSkip {
-			a.trayPause.SetLabel(pauseLabel(a.language, a.state))
-			a.trayPause.SetEnabled(canTogglePause(a.state))
-			a.trayStart.SetEnabled(a.state.Phase == breaks.Waiting)
+			setMenuLabel(a.trayPause, pauseLabel(a.language, a.state))
+			setMenuEnabled(a.trayPause, canTogglePause(a.state))
+			setMenuEnabled(a.trayStart, a.state.Phase == breaks.Waiting)
 		}
 	}
-	if a.settings != nil && a.settings.IsVisible() && (text != statusText(a.language, previous) || previous.CanSkip != a.state.CanSkip) {
+	if a.settings != nil && (statusDirty || previous.CanSkip != a.state.CanSkip) && a.settings.IsVisible() {
 		a.settings.Invalidate()
+	}
+	a.scheduleTick()
+}
+
+func (a *desktop) updateTrayStatus() {
+	text := statusText(a.language, a.state)
+	if text != a.trayText {
+		a.trayText = text
+		setMenuLabel(a.trayStatus, text)
+		a.tray.SetToolTip("Pausepoint · " + text)
+	}
+}
+
+func setMenuLabel(item *mygo.MenuItem, label string) {
+	if item.Label != label {
+		item.SetLabel(label)
+	}
+}
+
+func setMenuEnabled(item *mygo.MenuItem, enabled bool) {
+	if item.Disabled == enabled {
+		item.SetEnabled(enabled)
 	}
 }
 
