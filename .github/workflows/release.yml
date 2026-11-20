@@ -93,12 +93,6 @@ jobs:
           name: pausepoint-linux-windows
           path: release
 
-      - name: Download macOS package
-        uses: actions/download-artifact@v8
-        with:
-          name: pausepoint-macos
-          path: release
-
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
